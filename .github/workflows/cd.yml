@@ -11,7 +11,7 @@ jobs:
       - name: Deploy Backend to Azure App Service
         uses: azure/webapps-deploy@v2
         with:
-          app-name: "TOTES_BACKEND_APP_SERVICE"
+          app-name: "TOTES-BACKEND-APP-SERVICE"
           publish-profile: ${{ secrets.AZURE_BACKEND_PUBLISH_PROFILE }}
           images: "asliadarsh/todo-backend:latest"
           
