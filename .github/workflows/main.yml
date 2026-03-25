@@ -20,5 +20,5 @@ jobs:
 
       - name: Build & Push Backend Image
         run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/todo-backend .
-          docker push ${{ secrets.DOCKER_USERNAME }}/todo-backend
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/asliadarsh/todo-backend .
+          docker push ${{ secrets.DOCKER_USERNAME }}/asliadarsh/todo-backend
