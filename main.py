@@ -1,213 +1,116 @@
-from fastapi import FastAPI, HTTPException
+import os
+import datetime
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
-import sqlite3
-import datetime
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+
+# Use Azure Key Vault secret name 'DATABASE-URL' or local postgres fallback
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db:5432/todos_db")
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# --- Database Models ---
+class TodoModel(Base):
+    __tablename__ = "todos"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    notes = Column(Text, nullable=True)
+    completed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class NoteModel(Base):
+    __tablename__ = "standalone_notes"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Todo & Notes API")
 
-# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow local frontend
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-DB_FILE = "todos.db"
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-# Initialize DB
-def init_db():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS todos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            notes TEXT,
-            completed BOOLEAN NOT NULL DEFAULT 0,
-            created_at TIMESTAMP
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS standalone_notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            content TEXT,
-            created_at TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# Pydantic models
+# --- Pydantic Schemas ---
 class TodoBase(BaseModel):
     title: str
     notes: Optional[str] = ""
     completed: bool = False
 
-class TodoCreate(TodoBase):
-    pass
-
-class TodoUpdate(TodoBase):
-    pass
-
 class TodoResponse(TodoBase):
     id: int
-    created_at: str
+    created_at: datetime.datetime
+    class Config:
+        from_attributes = True
 
 class NoteBase(BaseModel):
     title: str
     content: Optional[str] = ""
 
-class NoteCreate(NoteBase):
-    pass
-
-class NoteUpdate(NoteBase):
-    pass
-
 class NoteResponse(NoteBase):
     id: int
-    created_at: str
+    created_at: datetime.datetime
+    class Config:
+        from_attributes = True
 
+# --- Endpoints ---
 @app.get("/todos", response_model=List[TodoResponse])
-def get_todos():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM todos ORDER BY created_at DESC')
-    rows = c.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+def get_todos(db: Session = Depends(get_db)):
+    return db.query(TodoModel).order_by(TodoModel.created_at.desc()).all()
 
 @app.post("/todos", response_model=TodoResponse)
-def create_todo(todo: TodoCreate):
-    conn = get_db_connection()
-    c = conn.cursor()
-    created_at = datetime.datetime.now().isoformat()
-    c.execute(
-        'INSERT INTO todos (title, notes, completed, created_at) VALUES (?, ?, ?, ?)',
-        (todo.title, todo.notes, todo.completed, created_at)
-    )
-    conn.commit()
-    todo_id = c.lastrowid
-    conn.close()
-    
-    return {
-        "id": todo_id,
-        "title": todo.title,
-        "notes": todo.notes,
-        "completed": todo.completed,
-        "created_at": created_at
-    }
+def create_todo(todo: TodoBase, db: Session = Depends(get_db)):
+    db_todo = TodoModel(**todo.model_dump())
+    db.add(db_todo)
+    db.commit()
+    db.refresh(db_todo)
+    return db_todo
 
 @app.put("/todos/{todo_id}", response_model=TodoResponse)
-def update_todo(todo_id: int, todo: TodoUpdate):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM todos WHERE id = ?', (todo_id,))
-    existing = c.fetchone()
-    if not existing:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Todo not found")
-        
-    c.execute(
-        'UPDATE todos SET title = ?, notes = ?, completed = ? WHERE id = ?',
-        (todo.title, todo.notes, todo.completed, todo_id)
-    )
-    conn.commit()
-    
-    c.execute('SELECT * FROM todos WHERE id = ?', (todo_id,))
-    updated_row = c.fetchone()
-    conn.close()
-    return dict(updated_row)
+def update_todo(todo_id: int, todo: TodoBase, db: Session = Depends(get_db)):
+    db_todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
+    if not db_todo: raise HTTPException(status_code=404)
+    for key, value in todo.model_dump().items():
+        setattr(db_todo, key, value)
+    db.commit()
+    return db_todo
 
 @app.delete("/todos/{todo_id}")
-def delete_todo(todo_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM todos WHERE id = ?', (todo_id,))
-    existing = c.fetchone()
-    if not existing:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Todo not found")
-        
-    c.execute('DELETE FROM todos WHERE id = ?', (todo_id,))
-    conn.commit()
-    conn.close()
-    return {"message": "Todo deleted successfully"}
+def delete_todo(todo_id: int, db: Session = Depends(get_db)):
+    db_todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
+    if not db_todo: raise HTTPException(status_code=404)
+    db.delete(db_todo)
+    db.commit()
+    return {"message": "Deleted"}
 
-# ---- Notes Endpoints ----
-
+# --- Note Endpoints ---
 @app.get("/notes", response_model=List[NoteResponse])
-def get_notes():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM standalone_notes ORDER BY created_at DESC')
-    rows = c.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+def get_notes(db: Session = Depends(get_db)):
+    return db.query(NoteModel).order_by(NoteModel.created_at.desc()).all()
 
 @app.post("/notes", response_model=NoteResponse)
-def create_note(note: NoteCreate):
-    conn = get_db_connection()
-    c = conn.cursor()
-    created_at = datetime.datetime.now().isoformat()
-    c.execute(
-        'INSERT INTO standalone_notes (title, content, created_at) VALUES (?, ?, ?)',
-        (note.title, note.content, created_at)
-    )
-    conn.commit()
-    note_id = c.lastrowid
-    conn.close()
-    
-    return {
-        "id": note_id,
-        "title": note.title,
-        "content": note.content,
-        "created_at": created_at
-    }
-
-@app.put("/notes/{note_id}", response_model=NoteResponse)
-def update_note(note_id: int, note: NoteUpdate):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM standalone_notes WHERE id = ?', (note_id,))
-    existing = c.fetchone()
-    if not existing:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Note not found")
-        
-    c.execute(
-        'UPDATE standalone_notes SET title = ?, content = ? WHERE id = ?',
-        (note.title, note.content, note_id)
-    )
-    conn.commit()
-    
-    c.execute('SELECT * FROM standalone_notes WHERE id = ?', (note_id,))
-    updated_row = c.fetchone()
-    conn.close()
-    return dict(updated_row)
-
-@app.delete("/notes/{note_id}")
-def delete_note(note_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM standalone_notes WHERE id = ?', (note_id,))
-    existing = c.fetchone()
-    if not existing:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Note not found")
-        
-    c.execute('DELETE FROM standalone_notes WHERE id = ?', (note_id,))
-    conn.commit()
-    conn.close()
-    return {"message": "Note deleted successfully"}
+def create_note(note: NoteBase, db: Session = Depends(get_db)):
+    db_note = NoteModel(**note.model_dump())
+    db.add(db_note)
+    db.commit()
+    db.refresh(db_note)
+    return db_note
