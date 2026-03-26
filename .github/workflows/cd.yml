@@ -1,0 +1,18 @@
+name: Backend CD
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy Backend to Azure App Service
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: "TOTES-BACKEND-APP-SERVICE"
+          publish-profile: ${{ secrets.AZURE_BACKEND_PUBLISH_PROFILE }}
+          images: "asliadarsh/todo-backend:${{ github.sha }}"
+          
+          
