@@ -8,14 +8,15 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
-# Use Azure Key Vault secret name 'DATABASE-URL' or local postgres fallback
+# 1. Database Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db:5432/todos_db")
 
+# Use 'psycopg2' for Postgres. SQLAlchemy handles the connection pooling.
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- Database Models ---
+# --- 2. Database Models ---
 class TodoModel(Base):
     __tablename__ = "todos"
     id = Column(Integer, primary_key=True, index=True)
@@ -31,10 +32,12 @@ class NoteModel(Base):
     content = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
+# Automatically create tables in Supabase/Postgres on startup
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Todo & Notes API")
 
+# --- 3. Middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,6 +46,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Dependency to get DB session
 def get_db():
     db = SessionLocal()
     try:
@@ -50,7 +54,7 @@ def get_db():
     finally:
         db.close()
 
-# --- Pydantic Schemas ---
+# --- 4. Pydantic Schemas ---
 class TodoBase(BaseModel):
     title: str
     notes: Optional[str] = ""
@@ -72,7 +76,13 @@ class NoteResponse(NoteBase):
     class Config:
         from_attributes = True
 
-# --- Endpoints ---
+# --- 5. Endpoints ---
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "timestamp": datetime.datetime.utcnow()}
+
+# --- Todo Endpoints ---
 @app.get("/todos", response_model=List[TodoResponse])
 def get_todos(db: Session = Depends(get_db)):
     return db.query(TodoModel).order_by(TodoModel.created_at.desc()).all()
@@ -88,19 +98,22 @@ def create_todo(todo: TodoBase, db: Session = Depends(get_db)):
 @app.put("/todos/{todo_id}", response_model=TodoResponse)
 def update_todo(todo_id: int, todo: TodoBase, db: Session = Depends(get_db)):
     db_todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
-    if not db_todo: raise HTTPException(status_code=404)
+    if not db_todo: 
+        raise HTTPException(status_code=404, detail="Todo not found")
     for key, value in todo.model_dump().items():
         setattr(db_todo, key, value)
     db.commit()
+    db.refresh(db_todo)
     return db_todo
 
 @app.delete("/todos/{todo_id}")
 def delete_todo(todo_id: int, db: Session = Depends(get_db)):
     db_todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
-    if not db_todo: raise HTTPException(status_code=404)
+    if not db_todo: 
+        raise HTTPException(status_code=404, detail="Todo not found")
     db.delete(db_todo)
     db.commit()
-    return {"message": "Deleted"}
+    return {"message": "Todo deleted successfully"}
 
 # --- Note Endpoints ---
 @app.get("/notes", response_model=List[NoteResponse])
@@ -114,3 +127,23 @@ def create_note(note: NoteBase, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_note)
     return db_note
+
+@app.put("/notes/{note_id}", response_model=NoteResponse)
+def update_note(note_id: int, note: NoteBase, db: Session = Depends(get_db)):
+    db_note = db.query(NoteModel).filter(NoteModel.id == note_id).first()
+    if not db_note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    for key, value in note.model_dump().items():
+        setattr(db_note, key, value)
+    db.commit()
+    db.refresh(db_note)
+    return db_note
+
+@app.delete("/notes/{note_id}")
+def delete_note(note_id: int, db: Session = Depends(get_db)):
+    db_note = db.query(NoteModel).filter(NoteModel.id == note_id).first()
+    if not db_note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    db.delete(db_note)
+    db.commit()
+    return {"message": "Note deleted successfully"}
